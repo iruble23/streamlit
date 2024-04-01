@@ -1,281 +1,267 @@
-from collections import defaultdict
-from pathlib import Path
-import sqlite3
-
-import streamlit as st
-import altair as alt
 import pandas as pd
+import gurobipy as gp
+from gurobipy import GRB
+import streamlit as st
 
+# Define non-binary labels globally
+non_binary_labels = [
+    'Messiness', 'Noise Level', 'Temperature (F)',
+    'Alcohol Consumption', 'Expected Bed Time', 'Expected Wake Time'
+]
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='Inventory tracker',
-    page_icon=':shopping_bags:', # This is an emoji shortcode. Could be a URL too.
-)
-
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-def connect_db():
-    '''Connects to the sqlite database.'''
-
-    DB_FILENAME = Path(__file__).parent/'inventory.db'
-    db_already_exists = DB_FILENAME.exists()
-
-    conn = sqlite3.connect(DB_FILENAME)
-    db_was_just_created = not db_already_exists
-
-    return conn, db_was_just_created
-
-
-def initialize_data(conn):
-    '''Initializes the inventory table with some data.'''
-    cursor = conn.cursor()
-
-    cursor.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_name TEXT,
-            price REAL,
-            units_sold INTEGER,
-            units_left INTEGER,
-            cost_price REAL,
-            reorder_point INTEGER,
-            description TEXT
-        )
-        '''
-    )
-
-    cursor.execute(
-        '''
-        INSERT INTO inventory
-            (item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-        VALUES
-            -- Beverages
-            ('Bottled Water (500ml)', 1.50, 115, 15, 0.80, 16, 'Hydrating bottled water'),
-            ('Soda (355ml)', 2.00, 93, 8, 1.20, 10, 'Carbonated soft drink'),
-            ('Energy Drink (250ml)', 2.50, 12, 18, 1.50, 8, 'High-caffeine energy drink'),
-            ('Coffee (hot, large)', 2.75, 11, 14, 1.80, 5, 'Freshly brewed hot coffee'),
-            ('Juice (200ml)', 2.25, 11, 9, 1.30, 5, 'Fruit juice blend'),
-
-            -- Snacks
-            ('Potato Chips (small)', 2.00, 34, 16, 1.00, 10, 'Salted and crispy potato chips'),
-            ('Candy Bar', 1.50, 6, 19, 0.80, 15, 'Chocolate and candy bar'),
-            ('Granola Bar', 2.25, 3, 12, 1.30, 8, 'Healthy and nutritious granola bar'),
-            ('Cookies (pack of 6)', 2.50, 8, 8, 1.50, 5, 'Soft and chewy cookies'),
-            ('Fruit Snack Pack', 1.75, 5, 10, 1.00, 8, 'Assortment of dried fruits and nuts'),
-
-            -- Personal Care
-            ('Toothpaste', 3.50, 1, 9, 2.00, 5, 'Minty toothpaste for oral hygiene'),
-            ('Hand Sanitizer (small)', 2.00, 2, 13, 1.20, 8, 'Small sanitizer bottle for on-the-go'),
-            ('Pain Relievers (pack)', 5.00, 1, 5, 3.00, 3, 'Over-the-counter pain relief medication'),
-            ('Bandages (box)', 3.00, 0, 10, 2.00, 5, 'Box of adhesive bandages for minor cuts'),
-            ('Sunscreen (small)', 5.50, 6, 5, 3.50, 3, 'Small bottle of sunscreen for sun protection'),
-
-            -- Household
-            ('Batteries (AA, pack of 4)', 4.00, 1, 5, 2.50, 3, 'Pack of 4 AA batteries'),
-            ('Light Bulbs (LED, 2-pack)', 6.00, 3, 3, 4.00, 2, 'Energy-efficient LED light bulbs'),
-            ('Trash Bags (small, 10-pack)', 3.00, 5, 10, 2.00, 5, 'Small trash bags for everyday use'),
-            ('Paper Towels (single roll)', 2.50, 3, 8, 1.50, 5, 'Single roll of paper towels'),
-            ('Multi-Surface Cleaner', 4.50, 2, 5, 3.00, 3, 'All-purpose cleaning spray'),
-
-            -- Others
-            ('Lottery Tickets', 2.00, 17, 20, 1.50, 10, 'Assorted lottery tickets'),
-            ('Newspaper', 1.50, 22, 20, 1.00, 5, 'Daily newspaper')
-        '''
-    )
-    conn.commit()
-
-
-def load_data(conn):
-    '''Loads the inventory data from the database.'''
-    cursor = conn.cursor()
-
+def load_data(file_path):
+    data = {}
     try:
-        cursor.execute('SELECT * FROM inventory')
-        data = cursor.fetchall()
-    except:
+        dataframe = pd.read_csv(file_path)
+        for _, row in dataframe.iterrows():
+            name = row['Name']
+            for label in non_binary_labels:
+                row[label] = float(row[label])  # Ensure all non-binary labels are float
+            data[name] = row.to_dict()
+    except Exception as e:
+        print(f"Error reading file: {e}")
         return None
+    return data
 
-    df = pd.DataFrame(data,
-        columns=[
-            'id',
-            'item_name',
-            'price',
-            'units_sold',
-            'units_left',
-            'cost_price',
-            'reorder_point',
-            'description',
-        ])
+# New optimize_matching function
+def optimize_matching(data, weights):
+    m = gp.Model()
+    x = m.addVars(data.keys(), data.keys(), vtype=GRB.BINARY, name='x')
 
-    return df
+    # Calculate ranges for each label to use in normalization
+    ranges = {}
+    for label in non_binary_labels:
+        all_values = [data[name][label] for name in data.keys()]
+        ranges[label] = max(all_values) - min(all_values) if max(all_values) != min(all_values) else 1
 
+    # Objective function: Minimize normalized incompatibility scores
+    m.setObjective(
+        gp.quicksum(
+            weights[label] * ((data[i][label] - data[j][label]) / ranges[label]) ** 2 * x[i, j]
+            for i in data.keys()
+            for j in data.keys() if i != j
+            for label in non_binary_labels
+        ),
+        GRB.MINIMIZE
+    )
 
-def update_data(conn, df, changes):
-    '''Updates the inventory data in the database.'''
-    cursor = conn.cursor()
+    # Constraints based on preferences
+    for i in data.keys():
+        for j in data.keys():
+            if i != j:
+                # Add constraints only when preferences are not compatible
+                if data[i]['Biological Sex'] != data[j]['Biological Sex']:
+                    m.addConstr(x[i, j] == 0, name=f"sex_constraint_{i}_{j}")
+                if data[i]['Overnight Guests'] != data[j]['Overnight Guests']:
+                    m.addConstr(x[i, j] == 0, name=f"guests_constraint_{i}_{j}")
 
-    if changes['edited_rows']:
-        deltas = st.session_state.inventory_table['edited_rows']
-        rows = []
+    # Ensure at least one match for each student
+    for i in data.keys():
+        m.addConstr(gp.quicksum(x[i, j] for j in data.keys() if i != j) >= 1)
 
-        for i, delta in deltas.items():
-            row_dict = df.iloc[i].to_dict()
-            row_dict.update(delta)
-            rows.append(row_dict)
+    m.optimize()
 
-        cursor.executemany(
-            '''
-            UPDATE inventory
-            SET
-                item_name = :item_name,
-                price = :price,
-                units_sold = :units_sold,
-                units_left = :units_left,
-                cost_price = :cost_price,
-                reorder_point = :reorder_point,
-                description = :description
-            WHERE id = :id
-            ''',
-            rows,
-        )
+    # Extract and sort matches based on compatibility score
+    top_matches = {i: [] for i in data.keys()}
+    for i in data.keys():
+        for j in data.keys():
+            if i != j and x[i, j].X > 0.5:  # If they are a potential match
+                score = sum(
+                    weights[label] * (data[i][label] - data[j][label]) ** 2
+                    for label in non_binary_labels
+                )
+                top_matches[i].append((j, score))
+        top_matches[i] = sorted(top_matches[i], key=lambda item: item[1])[:5]
+    
+     # After computing the compatibility scores
+    max_score = max([max(match[1] for match in matches) for matches in top_matches.values()]) if top_matches else 1
+    for i in top_matches.keys():
+        for j in range(len(top_matches[i])):
+            student, score = top_matches[i][j]
+            # Inverting and normalizing the score
+            compatibility_percentage = 100 * (1 - (score / max_score))
+            top_matches[i][j] = (student, round(compatibility_percentage, 2))
 
-    if changes['added_rows']:
-        cursor.executemany(
-            '''
-            INSERT INTO inventory
-                (id, item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-            VALUES
-                (:id, :item_name, :price, :units_sold, :units_left, :cost_price, :reorder_point, :description)
-            ''',
-            (defaultdict(lambda: None, row) for row in changes['added_rows']),
-        )
+    return top_matches
 
-    if changes['deleted_rows']:
-        cursor.executemany(
-            'DELETE FROM inventory WHERE id = :id',
-            ({'id': int(df.loc[i, 'id'])} for i in changes['deleted_rows'])
-        )
+# Function to optimize matching with fixed pairs
+def optimize_matching_with_fixed_pairs(data, weights, fixed_pairs):
+    m = gp.Model()
+    x = m.addVars(data.keys(), data.keys(), vtype=GRB.BINARY, name='x')
 
-    conn.commit()
+    # Normalization ranges
+    ranges = {label: max(all_values) - min(all_values) if max(all_values) != min(all_values) else 1 
+              for label in non_binary_labels 
+              for all_values in ([data[name][label] for name in data.keys()],)}
 
+    # Objective function: Minimize normalized incompatibility scores
+    m.setObjective(
+        gp.quicksum(
+            weights[label] * ((data[i][label] - data[j][label]) / ranges[label]) ** 2 * x[i, j]
+            for i in data.keys()
+            for j in data.keys() if i != j
+            for label in non_binary_labels
+        ),
+        GRB.MINIMIZE
+    )
 
-# -----------------------------------------------------------------------------
-# Draw the actual page, starting with the inventory table.
+    # Constraints based on preferences and fixed pairs
+    fixed_individuals = {person for pair in fixed_pairs for person in pair}
+    for i in data.keys():
+        for j in data.keys():
+            if i != j:
+                # Skip adding constraints for fixed pairs
+                if (i, j) in fixed_pairs or (j, i) in fixed_pairs:
+                    continue
+                
+                # Add constraints only when preferences are not compatible
+                if data[i]['Biological Sex'] != data[j]['Biological Sex']:
+                    m.addConstr(x[i, j] == 0, name=f"sex_constraint_{i}_{j}")
+                if data[i]['Overnight Guests'] != data[j]['Overnight Guests']:
+                    m.addConstr(x[i, j] == 0, name=f"guests_constraint_{i}_{j}")
 
-# Set the title that appears at the top of the page.
-'''
-# :shopping_bags: Inventory tracker
+    # Ensure at least one match for each student not in fixed pairs
+    for i in data.keys():
+        if i not in fixed_individuals:
+            m.addConstr(gp.quicksum(x[i, j] for j in data.keys() if i != j) >= 1)
 
-**Welcome to Alice's Corner Store's intentory tracker!**
-This page reads and writes directly from/to our inventory database.
-'''
+    m.optimize()
 
-st.info('''
-    Use the table below to add, remove, and edit items.
-    And don't forget to commit your changes when you're done.
-    ''')
+    # Extract results, excluding fixed individuals from the optimization results
+    top_matches = {i: [] for i in data.keys() if not any(i in pair for pair in fixed_pairs)}
+    for i in top_matches.keys():
+        for j in data.keys():
+            if j not in fixed_individuals and i != j and x[i, j].X > 0.5:
+                score = sum(weights[label] * ((data[i][label] - data[j][label]) / ranges[label])**2 
+                            for label in non_binary_labels)
+                top_matches[i].append((j, score))
+        top_matches[i] = sorted(top_matches[i], key=lambda item: item[1])[:5]
 
-# Connect to database and create table if needed
-conn, db_was_just_created = connect_db()
+    # Normalize the scores for other matches
+    max_score = 1
+    if any(matches for matches in top_matches.values()):
+        max_score = max([max(match[1] for match in matches) for matches in top_matches.values() if matches])
 
-# Initialize data.
-if db_was_just_created:
-    initialize_data(conn)
-    st.toast('Database initialized with some sample data.')
+    for i in top_matches.keys():
+        for j in range(len(top_matches[i])):
+            student, score = top_matches[i][j]
+            compatibility_percentage = 100 * (1 - (score / max_score))
+            top_matches[i][j] = (student, round(compatibility_percentage, 2))
 
-# Load data from database
-df = load_data(conn)
+    return fixed_pairs, top_matches
 
-# Display data with editable table
-edited_df = st.data_editor(
-    df,
-    disabled=['id'], # Don't allow editing the 'id' column.
-    num_rows='dynamic', # Allow appending/deleting rows.
-    column_config={
-        # Show dollar sign before price columns.
-        "price": st.column_config.NumberColumn(format="$%.2f"),
-        "cost_price": st.column_config.NumberColumn(format="$%.2f"),
-    },
-    key='inventory_table')
+# Initialize session state variables
+if 'show_matches' not in st.session_state:
+    st.session_state['show_matches'] = False
+if 'show_fixed_pairs' not in st.session_state:
+    st.session_state['show_fixed_pairs'] = False
+if 'optimize_results' not in st.session_state:
+    st.session_state['optimize_results'] = None
+if 'fixed_pairs_count' not in st.session_state:
+    st.session_state['fixed_pairs_count'] = 0
+if 'fixed_pairs' not in st.session_state:
+    st.session_state['fixed_pairs'] = []
 
-has_uncommitted_changes = any(len(v) for v in st.session_state.inventory_table.values())
+def get_color_for_score(score):
+    # This function returns a color from red to green based on the score
+    green = int(score * 2.55)
+    red = 255 - green
+    return f"rgb({red},{green},0)"
 
-st.button(
-    'Commit changes',
-    type='primary',
-    disabled=not has_uncommitted_changes,
-    # Update data in database
-    on_click=update_data,
-    args=(conn, df, st.session_state.inventory_table))
+def display_results(other_matches, fixed_pairs=None):
+    # Display Fixed Pairs
+    if fixed_pairs:
+        st.markdown("#### Fixed Pairs")
+        fixed_pairs_df = pd.DataFrame(fixed_pairs, columns=['Student 1', 'Student 2'])
+        st.write(fixed_pairs_df.to_html(index=False), unsafe_allow_html=True)
 
+    # Display Other Matches with color-coded compatibility scores
+    if other_matches:
+        st.markdown("#### Other Matches")
+        num_cols = 2  # Adjust as needed
+        # Sort the other_matches dictionary by student names
+        sorted_matches = dict(sorted(other_matches.items(), key=lambda x: x[0]))
 
-# -----------------------------------------------------------------------------
-# Now some cool charts
+        match_iterator = iter(sorted_matches.items())
 
-# Add some space
-''
-''
-''
+        while True:
+            cols = st.columns(num_cols)
+            try:
+                for i in range(num_cols):
+                    student, matches = next(match_iterator)
+                    html_content = f"<b>{student}'s Top Matches:</b><br><table>"
+                    html_content += "<tr><th>Match</th><th>Compatibility (%)</th></tr>"
+                    for match, score in matches:
+                        color = get_color_for_score(score)  # Function to determine the color
+                        html_content += f"<tr><td>{match}</td><td style='color: {color}'>{score}%</td></tr>"
+                    html_content += "</table>"
+                    with cols[i]:
+                        st.markdown(html_content, unsafe_allow_html=True)
+            except StopIteration:
+                break
 
-st.subheader('Units left', divider='red')
+# Streamlit UI code
+st.header("Upload Data")
+st.write("Upload your CSV file with student preferences for roommate matching.")
+uploaded_file = st.file_uploader("", type=["csv"])
 
-need_to_reorder = df[df['units_left'] < df['reorder_point']].loc[:, 'item_name']
+if uploaded_file is not None:
+    data = load_data(uploaded_file)
+    if data and isinstance(data, dict) and len(data) > 0:
+        st.header("Enter Parameters")
+        st.write("Set the weights for each preference to customize the matching algorithm. Please select values between 0 and 1 to indicate the importance of each parameter.")
+        weights = {}
+        for label in non_binary_labels:
+            weight = st.number_input(f"Weight for '{label}':", min_value=0.0, max_value=1.0, step=0.1, format="%.1f", key=label)
+            if weight < 0.0 or weight > 1.0:
+                st.error("Invalid weight: Please enter a value between 0.0 and 1.0.")
+            weights[label] = weight
 
-if len(need_to_reorder) > 0:
-    items = '\n'.join(f'* {name}' for name in need_to_reorder)
+        st.header("Optimize Roommate Matching")
+        st.write("Click the button to find the best roommate matches based on the preferences and weights.")
 
-    st.error(f"We're running dangerously low on the items below:\n {items}")
+        if st.button("Optimize Matching"):
+            optimized_matches = optimize_matching(data, weights)
+            st.session_state['optimize_results'] = optimized_matches
+            st.session_state['show_matches'] = True
 
-''
-''
+        # Display optimization results
+        if st.session_state['show_matches'] and st.session_state['optimize_results']:
+            display_results(st.session_state['optimize_results'])
 
-st.altair_chart(
-    # Layer 1: Bar chart.
-    alt.Chart(df)
-        .mark_bar(
-            orient='horizontal',
-        )
-        .encode(
-            x='units_left',
-            y='item_name',
-        )
-    # Layer 2: Chart showing the reorder point.
-    + alt.Chart(df)
-        .mark_point(
-            shape='diamond',
-            filled=True,
-            size=50,
-            color='salmon',
-            opacity=1,
-        )
-        .encode(
-            x='reorder_point',
-            y='item_name',
-        )
-    ,
-    use_container_width=True)
+        # Section for adding fixed pairs
+        if st.button("Add Fixed Pair"):
+            if st.session_state['fixed_pairs_count'] < 5:
+                st.session_state['fixed_pairs_count'] += 1
+            else:
+                st.warning("Maximum of 5 fixed pairs allowed.")
 
-st.caption('NOTE: The :diamonds: location shows the reorder point.')
+        if st.button("Remove Last Fixed Pair"):
+            if st.session_state['fixed_pairs_count'] > 0:
+                st.session_state['fixed_pairs_count'] -= 1
+                if st.session_state['fixed_pairs']:
+                    st.session_state['fixed_pairs'].pop()
 
-''
-''
-''
+        students = sorted(list(data.keys())) if data else []
+        for i in range(st.session_state['fixed_pairs_count']):
+            col1, col2 = st.columns(2)
+            with col1:
+                student1 = st.selectbox(f"Pair {i+1} - Student 1:", [''] + students, key=f'student1_{i}')
+            with col2:
+                student2 = st.selectbox(f"Pair {i+1} - Student 2:", [''] + students, key=f'student2_{i}')
+            if student1 and student2:
+                if student1 == student2:
+                    st.error("Invalid pair: Same student selected for both slots. Please select different students.")
+                elif (student1, student2) in st.session_state['fixed_pairs'] or (student2, student1) in st.session_state['fixed_pairs']:
+                    st.error("Invalid pair: This pair has already been selected.")
+                else:
+                    # Only add the pair if it's a new and valid combination
+                    if not any(student1 in pair or student2 in pair for pair in st.session_state['fixed_pairs']):
+                        st.session_state['fixed_pairs'].append((student1, student2))
 
-# -----------------------------------------------------------------------------
+        if st.session_state['fixed_pairs'] and st.button("Optimize Matching with Fixed Pairs"):
+            fixed_pairs, other_matches = optimize_matching_with_fixed_pairs(data, weights, st.session_state['fixed_pairs'])
+            display_results(other_matches, fixed_pairs)
 
-st.subheader('Best sellers', divider='orange')
-
-''
-''
-
-st.altair_chart(alt.Chart(df)
-    .mark_bar(orient='horizontal')
-    .encode(
-        x='units_sold',
-        y=alt.Y('item_name').sort('-x'),
-    ),
-    use_container_width=True)
+    else:
+        st.error("No data loaded or data format is incorrect.")
