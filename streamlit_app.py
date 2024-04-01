@@ -3,6 +3,8 @@ import gurobipy as gp
 from gurobipy import GRB
 import streamlit as st
 
+label_visibility='collapse'
+
 # Define non-binary labels globally
 non_binary_labels = [
     'Messiness', 'Noise Level', 'Temperature (F)',
