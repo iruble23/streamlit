@@ -248,23 +248,30 @@ if uploaded_file is not None:
                     st.session_state['fixed_pairs'].pop()
 
         students = sorted(list(data.keys())) if data else []
+        # Collecting selected pairs in a temporary list
+        temp_pairs = []
         for i in range(st.session_state['fixed_pairs_count']):
             col1, col2 = st.columns(2)
             with col1:
                 student1 = st.selectbox(f"Pair {i+1} - Student 1:", [''] + students, key=f'student1_{i}')
             with col2:
                 student2 = st.selectbox(f"Pair {i+1} - Student 2:", [''] + students, key=f'student2_{i}')
-            
-            # Check for invalid pair selections
+
             if student1 and student2:
-                if student1 == student2:
-                    st.error("Invalid pair: Same student selected for both slots. Please select different students.")
-                elif any((pair[0] == student1 and pair[1] == student2) or (pair[0] == student2 and pair[1] == student1) for pair in st.session_state['fixed_pairs']):
-                    st.error("Invalid pair: This pair has already been selected.")
-                else:
-                    # Add the pair if it's a new and valid combination
-                    if not any(student1 in pair or student2 in pair for pair in st.session_state['fixed_pairs']):
-                        st.session_state['fixed_pairs'].append((student1, student2))
+                temp_pairs.append((student1, student2))
+
+        # Validate and add new pairs
+        for student1, student2 in temp_pairs:
+            if student1 == student2:
+                st.error("Invalid pair: Same student selected for both slots. Please select different students.")
+                break
+            elif any((pair[0] == student1 and pair[1] == student2) or (pair[0] == student2 and pair[1] == student1) for pair in st.session_state['fixed_pairs']):
+                st.error("Invalid pair: This pair has already been selected.")
+                break
+            else:
+                # Add the pair if it's a new and valid combination
+                if not any(student1 in pair or student2 in pair for pair in st.session_state['fixed_pairs']):
+                    st.session_state['fixed_pairs'].append((student1, student2))
 
         if st.session_state['fixed_pairs'] and st.button("Optimize Matching with Fixed Pairs"):
             fixed_pairs, other_matches = optimize_matching_with_fixed_pairs(data, weights, st.session_state['fixed_pairs'])
