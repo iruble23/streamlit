@@ -3,6 +3,8 @@ import gurobipy as gp
 from gurobipy import GRB
 import streamlit as st
 
+label_visibility='collapse'
+
 # Define non-binary labels globally
 non_binary_labels = [
     'Messiness', 'Noise Level', 'Temperature (F)',
@@ -21,7 +23,7 @@ def load_data(file_path):
     except Exception as e:
         print(f"Error reading file: {e}")
         return None
-    return data, dataframe
+    return data
 
 # New optimize_matching function
 def optimize_matching(data, weights):
@@ -206,13 +208,8 @@ st.write("Upload your CSV file with student preferences for roommate matching.")
 uploaded_file = st.file_uploader("", type=["csv"])
 
 if uploaded_file is not None:
-    data, df = load_data(uploaded_file)
+    data = load_data(uploaded_file)
     if data and isinstance(data, dict) and len(data) > 0:
-        #Displaying the headers (column names)
-        st.header('2. Selected Mandatory Categories')
-        selected_headers = st.multiselect("From the categories below, select those that are mandatory for roommate selection (i.e. Sex/Gender)", options=[col for col in df.columns if col != 'Name'])
-        if selected_headers:
-            non_binary_labels = [header for header in df.columns.tolist() if header not in selected_headers and header != 'Name']
         st.header("Enter Parameters")
         st.write("Set the weights for each preference to customize the matching algorithm. Please select values between 0 and 1 to indicate the importance of each parameter.")
         weights = {}
