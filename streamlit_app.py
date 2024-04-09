@@ -254,13 +254,15 @@ if uploaded_file is not None:
                 student1 = st.selectbox(f"Pair {i+1} - Student 1:", [''] + students, key=f'student1_{i}')
             with col2:
                 student2 = st.selectbox(f"Pair {i+1} - Student 2:", [''] + students, key=f'student2_{i}')
+            
+            # Check for invalid pair selections
             if student1 and student2:
                 if student1 == student2:
                     st.error("Invalid pair: Same student selected for both slots. Please select different students.")
-                elif (student1, student2) in st.session_state['fixed_pairs'] or (student2, student1) in st.session_state['fixed_pairs']:
+                elif any((pair[0] == student1 and pair[1] == student2) or (pair[0] == student2 and pair[1] == student1) for pair in st.session_state['fixed_pairs']):
                     st.error("Invalid pair: This pair has already been selected.")
                 else:
-                    # Only add the pair if it's a new and valid combination
+                    # Add the pair if it's a new and valid combination
                     if not any(student1 in pair or student2 in pair for pair in st.session_state['fixed_pairs']):
                         st.session_state['fixed_pairs'].append((student1, student2))
 
